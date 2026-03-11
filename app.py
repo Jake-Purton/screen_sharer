@@ -1,8 +1,13 @@
-# app.py
 import os
+import json
 
 from aiohttp import web
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import (
+    RTCPeerConnection,
+    RTCSessionDescription,
+    RTCConfiguration,
+    RTCIceServer,
+)
 from aiortc.contrib.media import MediaRelay
 
 pcs = set()
@@ -13,6 +18,57 @@ relay = MediaRelay()
 latest_video_track = None
 latest_audio_track = None
 
+
+def load_ice_servers():
+    raw = os.getenv("ICE_SERVERS_JSON", "")
+    if not raw:
+        return []
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    normalized = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        urls = item.get("urls")
+        if not isinstance(urls, (str, list)):
+            continue
+
+        normalized.append(
+            {
+                "urls": urls,
+                "username": item.get("username"),
+                "credential": item.get("credential"),
+            }
+        )
+
+    return normalized
+
+
+ICE_SERVERS = load_ice_servers()
+
+
+def build_rtc_config():
+    if not ICE_SERVERS:
+        return RTCConfiguration(iceServers=[])
+
+    servers = []
+    for ice in ICE_SERVERS:
+        servers.append(
+            RTCIceServer(
+                urls=ice["urls"],
+                username=ice.get("username"),
+                credential=ice.get("credential"),
+            )
+        )
+    return RTCConfiguration(iceServers=servers)
+
 @routes.get("/")
 async def index(request):
     return web.FileResponse("index.html")
@@ -21,6 +77,11 @@ async def index(request):
 async def viewer(request):
     return web.FileResponse("viewer.html")
 
+
+@routes.get("/config")
+async def config(request):
+    return web.json_response({"iceServers": ICE_SERVERS})
+
 @routes.post("/offer/broadcast")
 async def offer_broadcast(request):
     global latest_video_track, latest_audio_track
@@ -28,7 +89,7 @@ async def offer_broadcast(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    pc = RTCPeerConnection()
+    pc = RTCPeerConnection(configuration=build_rtc_config())
     pcs.add(pc)
 
     @pc.on("connectionstatechange")
@@ -66,7 +127,7 @@ async def offer_viewer(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    pc = RTCPeerConnection()
+    pc = RTCPeerConnection(configuration=build_rtc_config())
     pcs.add(pc)
 
     @pc.on("connectionstatechange")

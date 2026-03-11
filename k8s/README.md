@@ -8,6 +8,24 @@ ghcr.io/jake-purton/screen_sharer:latest
 
 If the package is private in GitHub Container Registry, either make it public in the package settings or create an `imagePullSecret` in the cluster.
 
+## TURN relay for media
+
+If pages load but remote media is blank, signaling is working and ICE connectivity is failing. To relay media across restrictive networks, configure TURN via `ICE_SERVERS_JSON` in `k8s/deployment.yaml`.
+
+Default STUN-only value:
+
+```yaml
+- name: ICE_SERVERS_JSON
+  value: '[{"urls":["stun:stun.l.google.com:19302"]}]'
+```
+
+Recommended for public internet (STUN + TURN):
+
+```yaml
+- name: ICE_SERVERS_JSON
+  value: '[{"urls":["stun:stun.l.google.com:19302"]},{"urls":["turn:turn.example.com:3478?transport=udp","turns:turn.example.com:5349?transport=tcp"],"username":"TURN_USER","credential":"TURN_PASS"}]'
+```
+
 ## 1) Pull and test the published image
 
 ```bash
@@ -52,7 +70,6 @@ image: ghcr.io/jake-purton/screen_sharer:latest
 ```bash
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/ingress.yaml
 ```
 
 ## 6) Verify rollout
@@ -60,7 +77,6 @@ kubectl apply -f k8s/ingress.yaml
 ```bash
 kubectl get pods -l app=screen-share
 kubectl get svc screen-share
-kubectl get ingress screen-share
 ```
 
 ## 7) Cloudflare Tunnel note

@@ -21,7 +21,9 @@ function getDisplayMediaFn() {
 }
 
 async function start() {
-    const pc = new RTCPeerConnection();
+    const configResp = await fetch("/config");
+    const config = configResp.ok ? await configResp.json() : { iceServers: [] };
+    const pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
     const videoEl = document.getElementById("video");
     const statusEl = document.getElementById("status");
     const getDisplayMedia = getDisplayMediaFn();
