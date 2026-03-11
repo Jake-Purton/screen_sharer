@@ -1,30 +1,23 @@
 # Deploy screen_share to k3s
 
-The published container image for this repo is:
+This app now streams screen video/audio using plain WebSockets.
+
+Broadcaster flow:
+- Browser captures screen.
+- Browser encodes chunks with MediaRecorder.
+- Chunks are sent to `/ws/broadcast`.
+
+Viewer flow:
+- Viewer connects to `/ws/viewer`.
+- Server fans out chunks to all connected viewers.
+
+Published image:
 
 ```text
 ghcr.io/jake-purton/screen_sharer:latest
 ```
 
-If the package is private in GitHub Container Registry, either make it public in the package settings or create an `imagePullSecret` in the cluster.
-
-## TURN relay for media
-
-If pages load but remote media is blank, signaling is working and ICE connectivity is failing. To relay media across restrictive networks, configure TURN via `ICE_SERVERS_JSON` in `k8s/deployment.yaml`.
-
-Default STUN-only value:
-
-```yaml
-- name: ICE_SERVERS_JSON
-  value: '[{"urls":["stun:stun.l.google.com:19302"]}]'
-```
-
-Recommended for public internet (STUN + TURN):
-
-```yaml
-- name: ICE_SERVERS_JSON
-  value: '[{"urls":["stun:stun.l.google.com:19302"]},{"urls":["turn:turn.example.com:3478?transport=udp","turns:turn.example.com:5349?transport=tcp"],"username":"TURN_USER","credential":"TURN_PASS"}]'
-```
+If the package is private in GitHub Container Registry, either make it public in package settings or create an `imagePullSecret` in the cluster.
 
 ## 1) Pull and test the published image
 
@@ -44,41 +37,34 @@ docker build -t screen-share:local .
 docker run --rm -p 30003:30003 screen-share:local
 ```
 
-Open:
-- http://localhost:30003
-- http://localhost:30003/viewer
-
 ## 3) Tag and push image manually
-
-The GitHub Actions workflow now publishes automatically to GHCR on pushes to `main`, so you usually do not need to do this by hand. If you want to push manually, use:
 
 ```bash
 docker tag screen-share:local ghcr.io/jake-purton/screen_sharer:latest
 docker push ghcr.io/jake-purton/screen_sharer:latest
 ```
 
-## 4) Update deployment image
-
-`k8s/deployment.yaml` should use:
-
-```yaml
-image: ghcr.io/jake-purton/screen_sharer:latest
-```
-
-## 5) Apply manifests to k3s
+## 4) Apply manifests to k3s
 
 ```bash
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 ```
 
-## 6) Verify rollout
+## 5) Verify rollout
 
 ```bash
 kubectl get pods -l app=screen-share
 kubectl get svc screen-share
+kubectl port-forward svc/screen-share 8080:80
 ```
 
-## 7) Cloudflare Tunnel note
+Use:
+- http://localhost:8080
+- http://localhost:8080/viewer
 
-For this app, Cloudflare Tunnel can handle HTTP signaling (`/offer/*`), but WebRTC media may still require TURN for reliable public internet access.
+## Notes on latency
+
+- Latency is controlled mostly by MediaRecorder chunk size.
+- Current implementation sends chunks every 250ms.
+- Lower values reduce latency but increase CPU/network overhead.

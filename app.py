@@ -1,73 +1,16 @@
 import os
-import json
+from collections import deque
 
-from aiohttp import web
-from aiortc import (
-    RTCPeerConnection,
-    RTCSessionDescription,
-    RTCConfiguration,
-    RTCIceServer,
-)
-from aiortc.contrib.media import MediaRelay
+from aiohttp import WSMsgType, web
 
-pcs = set()
 routes = web.RouteTableDef()
-relay = MediaRelay()
 
-# Latest tracks published by the broadcaster.
-latest_video_track = None
-latest_audio_track = None
+# One active broadcaster and many viewers.
+broadcaster_ws = None
+viewer_sockets = set()
 
-
-def load_ice_servers():
-    raw = os.getenv("ICE_SERVERS_JSON", "")
-    if not raw:
-        return []
-
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-
-    if not isinstance(parsed, list):
-        return []
-
-    normalized = []
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        urls = item.get("urls")
-        if not isinstance(urls, (str, list)):
-            continue
-
-        normalized.append(
-            {
-                "urls": urls,
-                "username": item.get("username"),
-                "credential": item.get("credential"),
-            }
-        )
-
-    return normalized
-
-
-ICE_SERVERS = load_ice_servers()
-
-
-def build_rtc_config():
-    if not ICE_SERVERS:
-        return RTCConfiguration(iceServers=[])
-
-    servers = []
-    for ice in ICE_SERVERS:
-        servers.append(
-            RTCIceServer(
-                urls=ice["urls"],
-                username=ice.get("username"),
-                credential=ice.get("credential"),
-            )
-        )
-    return RTCConfiguration(iceServers=servers)
+# Keep a small rolling buffer so late-joining viewers can start quickly.
+recent_chunks = deque(maxlen=12)
 
 @routes.get("/")
 async def index(request):
@@ -78,77 +21,88 @@ async def viewer(request):
     return web.FileResponse("viewer.html")
 
 
-@routes.get("/config")
-async def config(request):
-    return web.json_response({"iceServers": ICE_SERVERS})
+@routes.get("/healthz")
+async def healthz(request):
+    return web.json_response({"ok": True, "viewers": len(viewer_sockets)})
 
-@routes.post("/offer/broadcast")
-async def offer_broadcast(request):
-    global latest_video_track, latest_audio_track
 
-    params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+@routes.get("/ws/broadcast")
+async def ws_broadcast(request):
+    global broadcaster_ws
 
-    pc = RTCPeerConnection(configuration=build_rtc_config())
-    pcs.add(pc)
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
 
-    @pc.on("connectionstatechange")
-    async def on_state_change():
-        if pc.connectionState in {"failed", "closed"}:
-            await pc.close()
-            pcs.discard(pc)
+    if broadcaster_ws is not None and not broadcaster_ws.closed:
+        await broadcaster_ws.close(code=4000, message=b"Replaced by new broadcaster")
 
-    @pc.on("track")
-    def on_track(track):
-        global latest_video_track, latest_audio_track
+    broadcaster_ws = ws
+    recent_chunks.clear()
 
-        if track.kind == "video":
-            latest_video_track = track
-        elif track.kind == "audio":
-            latest_audio_track = track
+    await ws.send_json({"type": "ready", "viewers": len(viewer_sockets)})
 
-        @track.on("ended")
-        async def on_ended():
-            if track.kind == "video" and latest_video_track is track:
-                latest_video_track = None
-            if track.kind == "audio" and latest_audio_track is track:
-                latest_audio_track = None
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                chunk = msg.data
+                recent_chunks.append(chunk)
 
-    await pc.setRemoteDescription(offer)
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
+                stale = []
+                for viewer_ws in viewer_sockets:
+                    if viewer_ws.closed:
+                        stale.append(viewer_ws)
+                        continue
+                    try:
+                        await viewer_ws.send_bytes(chunk)
+                    except ConnectionResetError:
+                        stale.append(viewer_ws)
 
-    return web.json_response(
-        {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+                for closed_ws in stale:
+                    viewer_sockets.discard(closed_ws)
+
+            elif msg.type == WSMsgType.TEXT:
+                if msg.data == "ping":
+                    await ws.send_str("pong")
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        if broadcaster_ws is ws:
+            broadcaster_ws = None
+
+    return ws
+
+
+@routes.get("/ws/viewer")
+async def ws_viewer(request):
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+
+    viewer_sockets.add(ws)
+
+    # New viewers get a short warm-up buffer for quicker start.
+    for chunk in recent_chunks:
+        try:
+            await ws.send_bytes(chunk)
+        except ConnectionResetError:
+            break
+
+    await ws.send_json(
+        {
+            "type": "status",
+            "broadcasterConnected": broadcaster_ws is not None and not broadcaster_ws.closed,
+        }
     )
 
-@routes.post("/offer/viewer")
-async def offer_viewer(request):
-    params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT and msg.data == "ping":
+                await ws.send_str("pong")
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        viewer_sockets.discard(ws)
 
-    pc = RTCPeerConnection(configuration=build_rtc_config())
-    pcs.add(pc)
-
-    @pc.on("connectionstatechange")
-    async def on_state_change():
-        if pc.connectionState in {"failed", "closed"}:
-            await pc.close()
-            pcs.discard(pc)
-
-    # Subscribe each viewer to the latest published tracks.
-    if latest_video_track is not None:
-        pc.addTrack(relay.subscribe(latest_video_track))
-    if latest_audio_track is not None:
-        pc.addTrack(relay.subscribe(latest_audio_track))
-
-    await pc.setRemoteDescription(offer)
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-
-    return web.json_response(
-        {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-    )
+    return ws
 
 app = web.Application()
 app.add_routes(routes)

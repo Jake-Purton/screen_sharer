@@ -26,17 +26,15 @@ spec:
               value: "0.0.0.0"
             - name: PORT
               value: "30003"
-            - name: ICE_SERVERS_JSON
-              value: '[{"urls":["stun:stun.l.google.com:19302"]}]'
           readinessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20

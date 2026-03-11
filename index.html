@@ -6,80 +6,104 @@
 <video id="video" autoplay playsinline></video>
 <div style="margin-top: 12px;">
   <button id="startBtn">Start Screen Share</button>
+    <button id="stopBtn" disabled>Stop</button>
   <p id="status"></p>
 </div>
 
 <script>
-function getDisplayMediaFn() {
-    if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
-        return (constraints) => navigator.mediaDevices.getDisplayMedia(constraints);
-    }
-    if (navigator.getDisplayMedia) {
-        return (constraints) => navigator.getDisplayMedia(constraints);
-    }
-    return null;
+const videoEl = document.getElementById("video");
+const statusEl = document.getElementById("status");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+
+let stream;
+let ws;
+let recorder;
+
+function bestMimeType() {
+    const candidates = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm"
+    ];
+    return candidates.find((m) => MediaRecorder.isTypeSupported(m)) || "";
 }
 
 async function start() {
-    const configResp = await fetch("/config");
-    const config = configResp.ok ? await configResp.json() : { iceServers: [] };
-    const pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
-    const videoEl = document.getElementById("video");
-    const statusEl = document.getElementById("status");
-    const getDisplayMedia = getDisplayMediaFn();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        throw new Error("Screen capture API unavailable in this browser/context.");
+    }
 
     statusEl.textContent = "Requesting screen capture permission...";
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    videoEl.srcObject = stream;
 
-    if (!getDisplayMedia) {
-        throw new Error(
-            "This browser/context does not support screen capture. Use Chrome/Edge/Safari and open via http://localhost:8080 or HTTPS."
-        );
-    }
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${protocol}://${location.host}/ws/broadcast`);
+    ws.binaryType = "arraybuffer";
 
-    pc.ontrack = (event) => {
-        videoEl.srcObject = event.streams[0];
+    await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error("WebSocket connection failed"));
+    });
+
+    const mimeType = bestMimeType();
+    recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+    recorder.ondataavailable = async (event) => {
+        if (!event.data || event.data.size === 0 || ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        const chunk = await event.data.arrayBuffer();
+        ws.send(chunk);
     };
 
-    // Ask browser for screen + audio
-    const stream = await getDisplayMedia({
-        video: true,
-        audio: true
+    recorder.onerror = () => {
+        statusEl.textContent = "Recorder error. Please restart sharing.";
+    };
+
+    stream.getVideoTracks().forEach((track) => {
+        track.onended = () => stop();
     });
 
-    stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const resp = await fetch("/offer/broadcast", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({sdp: offer.sdp, type: offer.type})
-    });
-
-    if (!resp.ok) {
-        throw new Error("Broadcast offer failed with status " + resp.status);
-    }
-
-    const answer = await resp.json();
-    await pc.setRemoteDescription(answer);
-
-    statusEl.textContent = "Sharing started.";
+    // Small timeslice keeps latency low while remaining stable.
+    recorder.start(250);
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    statusEl.textContent = "Sharing over WebSocket.";
 }
 
-document.getElementById("startBtn").addEventListener("click", async () => {
+function stop() {
+    if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+    }
+    recorder = undefined;
+
+    if (ws && ws.readyState <= WebSocket.OPEN) {
+        ws.close();
+    }
+    ws = undefined;
+
+    if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+    }
+    stream = undefined;
+    videoEl.srcObject = null;
+
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    statusEl.textContent = "Stopped.";
+}
+
+startBtn.addEventListener("click", async () => {
     try {
         await start();
     } catch (err) {
-        document.getElementById("status").textContent =
-            "Screen share failed: " + (err && err.message ? err.message : String(err));
+        statusEl.textContent = "Screen share failed: " + (err && err.message ? err.message : String(err));
     }
 });
 
-if (!getDisplayMediaFn()) {
-    document.getElementById("status").textContent =
-        "Screen capture API not available in this browser/context.";
-}
+stopBtn.addEventListener("click", stop);
 </script>
 </body>
 </html>

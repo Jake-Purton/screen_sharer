@@ -6,46 +6,82 @@
 <p id="status"></p>
 
 <script>
+const videoEl = document.getElementById("video");
+const statusEl = document.getElementById("status");
+
+function chooseMimeType() {
+    const candidates = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm"
+    ];
+    return candidates.find((m) => MediaSource.isTypeSupported(m));
+}
+
 async function startViewer() {
-    const configResp = await fetch("/config");
-    const config = configResp.ok ? await configResp.json() : { iceServers: [] };
-    const pc = new RTCPeerConnection({ iceServers: config.iceServers || [] });
-    const videoEl = document.getElementById("video");
-    const statusEl = document.getElementById("status");
-
-    statusEl.textContent = "Connecting to stream...";
-
-    pc.ontrack = (event) => {
-        videoEl.srcObject = event.streams[0];
-        statusEl.textContent = "Live stream connected.";
-    };
-
-    // Ask to receive media from the server.
-    pc.addTransceiver("video", { direction: "recvonly" });
-    pc.addTransceiver("audio", { direction: "recvonly" });
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const resp = await fetch("/offer/viewer", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
-    });
-
-    if (!resp.ok) {
-        throw new Error("Viewer offer failed with status " + resp.status);
+    const mimeType = chooseMimeType();
+    if (!mimeType) {
+        throw new Error("No supported media type for playback in this browser.");
     }
 
-    const answer = await resp.json();
-    await pc.setRemoteDescription(answer);
+    const mediaSource = new MediaSource();
+    videoEl.src = URL.createObjectURL(mediaSource);
 
-    statusEl.textContent = "Waiting for broadcaster...";
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${protocol}://${location.host}/ws/viewer`);
+    ws.binaryType = "arraybuffer";
+
+    const queue = [];
+    let sourceBuffer;
+
+    function appendNext() {
+        if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) {
+            return;
+        }
+        sourceBuffer.appendBuffer(queue.shift());
+    }
+
+    mediaSource.addEventListener("sourceopen", () => {
+        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+        sourceBuffer.mode = "sequence";
+        sourceBuffer.addEventListener("updateend", appendNext);
+        appendNext();
+    }, { once: true });
+
+    ws.onopen = () => {
+        statusEl.textContent = "Connected. Waiting for stream...";
+    };
+
+    ws.onmessage = (event) => {
+        if (typeof event.data === "string") {
+            try {
+                const payload = JSON.parse(event.data);
+                if (payload.type === "status" && !payload.broadcasterConnected) {
+                    statusEl.textContent = "Connected. Waiting for broadcaster...";
+                }
+            } catch (_) {
+                // Ignore non-JSON text payloads.
+            }
+            return;
+        }
+
+        queue.push(new Uint8Array(event.data));
+        appendNext();
+        statusEl.textContent = "Live stream playing.";
+        videoEl.play().catch(() => {});
+    };
+
+    ws.onclose = () => {
+        statusEl.textContent = "Disconnected from server.";
+    };
+
+    ws.onerror = () => {
+        statusEl.textContent = "Viewer socket error.";
+    };
 }
 
 startViewer().catch((err) => {
-    document.getElementById("status").textContent =
-        "Viewer failed: " + (err && err.message ? err.message : String(err));
+    statusEl.textContent = "Viewer failed: " + (err && err.message ? err.message : String(err));
 });
 </script>
 </body>
