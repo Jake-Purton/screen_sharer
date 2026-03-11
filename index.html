@@ -10,104 +10,41 @@
 </div>
 
 <script>
-function setPreferredVideoCodec(transceiver) {
-    const caps = RTCRtpSender.getCapabilities("video");
-    if (!caps || !caps.codecs) return;
-
-    const preferredOrder = ["video/AV1", "video/VP9", "video/H264", "video/VP8"];
-    const codecs = [];
-
-    preferredOrder.forEach((mimeType) => {
-        caps.codecs.forEach((codec) => {
-            if (codec.mimeType === mimeType) {
-                codecs.push(codec);
-            }
-        });
-    });
-
-    if (codecs.length > 0) {
-        transceiver.setCodecPreferences(codecs);
+function getDisplayMediaFn() {
+    if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+        return (constraints) => navigator.mediaDevices.getDisplayMedia(constraints);
     }
-}
-
-async function tuneSender(sender, kind) {
-    const params = sender.getParameters() || {};
-    if (!params.encodings || params.encodings.length === 0) {
-        params.encodings = [{}];
+    if (navigator.getDisplayMedia) {
+        return (constraints) => navigator.getDisplayMedia(constraints);
     }
-
-    if (kind === "video") {
-        params.degradationPreference = "maintain-resolution";
-        params.encodings[0].maxBitrate = 12000000;
-        params.encodings[0].maxFramerate = 60;
-        params.encodings[0].scaleResolutionDownBy = 1;
-    }
-
-    if (kind === "audio") {
-        params.encodings[0].maxBitrate = 192000;
-    }
-
-    try {
-        await sender.setParameters(params);
-    } catch (err) {
-        // Some browsers reject unsupported params; keep streaming with defaults.
-        console.warn("setParameters failed:", err);
-    }
+    return null;
 }
 
 async function start() {
     const pc = new RTCPeerConnection();
     const videoEl = document.getElementById("video");
     const statusEl = document.getElementById("status");
+    const getDisplayMedia = getDisplayMediaFn();
 
     statusEl.textContent = "Requesting screen capture permission...";
+
+    if (!getDisplayMedia) {
+        throw new Error(
+            "This browser/context does not support screen capture. Use Chrome/Edge/Safari and open via http://localhost:8080 or HTTPS."
+        );
+    }
 
     pc.ontrack = (event) => {
         videoEl.srcObject = event.streams[0];
     };
 
     // Ask browser for screen + audio
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-            width: { ideal: 3840, max: 3840 },
-            height: { ideal: 2160, max: 2160 },
-            frameRate: { ideal: 60, max: 60 }
-        },
-        audio: {
-            sampleRate: 48000,
-            channelCount: 2,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false
-        }
+    const stream = await getDisplayMedia({
+        video: true,
+        audio: true
     });
 
-    const videoTrack = stream.getVideoTracks()[0];
-    if (videoTrack) {
-        videoTrack.contentHint = "detail";
-        try {
-            await videoTrack.applyConstraints({
-                width: { ideal: 3840, max: 3840 },
-                height: { ideal: 2160, max: 2160 },
-                frameRate: { ideal: 60, max: 60 }
-            });
-        } catch (err) {
-            console.warn("Video constraints fallback:", err);
-        }
-    }
-
-    const senders = [];
-    stream.getTracks().forEach((track) => {
-        const transceiver = pc.addTransceiver(track, { direction: "sendonly" });
-        if (track.kind === "video") {
-            setPreferredVideoCodec(transceiver);
-        }
-        senders.push(transceiver.sender);
-    });
-
-    await Promise.all(
-        senders.map((sender) => tuneSender(sender, sender.track ? sender.track.kind : "video"))
-    );
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -125,7 +62,7 @@ async function start() {
     const answer = await resp.json();
     await pc.setRemoteDescription(answer);
 
-    statusEl.textContent = "Sharing started at best available quality.";
+    statusEl.textContent = "Sharing started.";
 }
 
 document.getElementById("startBtn").addEventListener("click", async () => {
@@ -136,6 +73,11 @@ document.getElementById("startBtn").addEventListener("click", async () => {
             "Screen share failed: " + (err && err.message ? err.message : String(err));
     }
 });
+
+if (!getDisplayMediaFn()) {
+    document.getElementById("status").textContent =
+        "Screen capture API not available in this browser/context.";
+}
 </script>
 </body>
 </html>
