@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: screen-share
-          image: ghcr.io/your-user/screen-share:latest
+          image: ghcr.io/jake-purton/screen_sharer:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 30003
