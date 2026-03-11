@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h1>Viewer</h1>
+<video id="video" autoplay playsinline controls style="max-width: 100%;"></video>
+<p id="status"></p>
+
+<script>
+async function startViewer() {
+    const pc = new RTCPeerConnection();
+    const videoEl = document.getElementById("video");
+    const statusEl = document.getElementById("status");
+
+    statusEl.textContent = "Connecting to stream...";
+
+    pc.ontrack = (event) => {
+        videoEl.srcObject = event.streams[0];
+        statusEl.textContent = "Live stream connected.";
+    };
+
+    // Ask to receive media from the server.
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const resp = await fetch("/offer/viewer", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
+    });
+
+    if (!resp.ok) {
+        throw new Error("Viewer offer failed with status " + resp.status);
+    }
+
+    const answer = await resp.json();
+    await pc.setRemoteDescription(answer);
+
+    statusEl.textContent = "Waiting for broadcaster...";
+}
+
+startViewer().catch((err) => {
+    document.getElementById("status").textContent =
+        "Viewer failed: " + (err && err.message ? err.message : String(err));
+});
+</script>
+</body>
+</html>
