@@ -1,4 +1,6 @@
 # app.py
+import os
+
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
@@ -89,4 +91,7 @@ async def offer_viewer(request):
 
 app = web.Application()
 app.add_routes(routes)
-web.run_app(app, port=8080)
+
+host = os.getenv("HOST", "0.0.0.0")
+port = int(os.getenv("PORT", "30003"))
+web.run_app(app, host=host, port=port)

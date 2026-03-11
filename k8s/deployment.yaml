@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: screen-share
+  labels:
+    app: screen-share
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: screen-share
+  template:
+    metadata:
+      labels:
+        app: screen-share
+    spec:
+      containers:
+        - name: screen-share
+          image: ghcr.io/your-user/screen-share:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 30003
+              name: http
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "30003"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
