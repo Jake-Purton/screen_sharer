@@ -1,88 +1,183 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen Share – Viewer</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1.5rem; background: #111; color: #eee; }
+  h1 { font-size: 1.2rem; margin-bottom: .5rem; }
+  video { width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 6px; display: block; }
+  #status { font-size: .85rem; color: #aaa; margin-top: .5rem; }
+</style>
+</head>
 <body>
-<h1>Viewer</h1>
-<video id="video" autoplay playsinline controls style="max-width: 100%;"></video>
-<p id="status"></p>
+<h1>Screen Share – Viewer</h1>
+<video id="video" autoplay playsinline controls></video>
+<p id="status">Connecting…</p>
 
 <script>
-const videoEl = document.getElementById("video");
-const statusEl = document.getElementById("status");
+/**
+ * Low-latency screen share viewer.
+ *
+ * Receives binary WebM chunks over WebSocket and feeds them into a
+ * MediaSource SourceBuffer (VP9/WebM) which drives a <video> element.
+ *
+ * Stream format
+ * ─────────────
+ * The server sends the broadcaster's WebM byte stream in cluster-sized
+ * chunks.  The very first chunk contains the full WebM initialisation
+ * segment (EBML + Tracks + first Cluster) so late-joining viewers can
+ * start decoding without waiting for the next keyframe from the sender.
+ *
+ * SourceBuffer mode = 'sequence' tells MSE to ignore timestamps and play
+ * data in receive order, which is the correct behaviour for a live relay.
+ *
+ * Latency tuning
+ * ──────────────
+ * • Buffer trim (every 5 s): removes old content so the buffer doesn't
+ *   grow indefinitely and MSE doesn't throw QuotaExceededError.
+ * • Live-edge correction (every 500 ms): if the video falls more than
+ *   1.5 s behind the buffered end it jumps to within 0.1 s of the edge.
+ *   This keeps the viewer close to real-time even if the browser's
+ *   built-in playback rate adjustment isn't enough.
+ *
+ * Browser support: Chrome 94+, Firefox 130+.
+ */
 
-function chooseMimeType() {
-    const candidates = [
-        "video/webm;codecs=vp9,opus",
-        "video/webm;codecs=vp8,opus",
-        "video/webm"
-    ];
-    return candidates.find((m) => MediaSource.isTypeSupported(m));
-}
+const videoEl  = document.getElementById('video');
+const statusEl = document.getElementById('status');
+
+const MIME_TYPE = 'video/webm;codecs=vp9';
+
+function setStatus(msg) { statusEl.textContent = msg; }
 
 async function startViewer() {
-    const mimeType = chooseMimeType();
-    if (!mimeType) {
-        throw new Error("No supported media type for playback in this browser.");
+  if (!('MediaSource' in window))
+    throw new Error('MediaSource (MSE) not supported in this browser.');
+  if (!MediaSource.isTypeSupported(MIME_TYPE))
+    throw new Error(`${MIME_TYPE} not supported. Use Chrome or Firefox.`);
+
+  // ── MediaSource setup ──────────────────────────────────────────────────────
+  const mediaSource = new MediaSource();
+  videoEl.src = URL.createObjectURL(mediaSource);
+
+  let sourceBuffer;
+  const queue = [];
+  let initSegmentReceived = false;
+
+  function appendNext() {
+    if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) {
+      if (queue.length > 0) console.log('[Viewer] Cannot append: SB updating or not ready');
+      return;
+    }
+    try {
+      const chunk = queue.shift();
+      console.log(`[Viewer] Appending ${chunk.byteLength} bytes to SourceBuffer (queue was ${queue.length + 1})`);
+      sourceBuffer.appendBuffer(chunk);
+    } catch (err) {
+      if (err.name === 'QuotaExceededError') {
+        console.warn('[Viewer] QuotaExceededError – trimming buffer');
+        trimBuffer(); // Free space; updateend will retry via appendNext
+        return;
+      }
+      console.error('appendBuffer error:', err);
+      setStatus('Stream error – please reload.');
+    }
+  }
+
+  mediaSource.addEventListener('sourceopen', () => {
+    console.log('[Viewer] MediaSource opened, creating SourceBuffer');
+    sourceBuffer = mediaSource.addSourceBuffer(MIME_TYPE);
+    // 'sequence' mode: MSE ignores embedded timestamps and plays data in
+    // the order it is appended.  This is correct for a live relay stream.
+    sourceBuffer.mode = 'sequence';
+    sourceBuffer.addEventListener('updateend', () => {
+      console.log('[Viewer] SourceBuffer updateend, queue length:', queue.length);
+      appendNext();
+    });
+    sourceBuffer.addEventListener('error', (e) => {
+      console.error('SourceBuffer error:', e);
+      setStatus('Decode error – stream format mismatch.');
+    });
+    console.log('[Viewer] SourceBuffer ready, calling appendNext');
+    appendNext(); // Flush anything queued before sourceopen fired
+  }, { once: true });
+
+  // ── Buffer trim: prevent unbounded memory growth ──────────────────────────
+  function trimBuffer() {
+    if (!sourceBuffer || sourceBuffer.updating || !videoEl.buffered.length) return;
+    const end      = videoEl.buffered.end(videoEl.buffered.length - 1);
+    const keepFrom = Math.max(0, end - 8); // Keep last 8 s
+    if (keepFrom > 0) {
+      try { sourceBuffer.remove(0, keepFrom); } catch { /* ignore */ }
+    }
+  }
+  const trimInterval = setInterval(trimBuffer, 5_000);
+
+  // ── Live-edge correction: stay within ~0.1 s of the live edge ────────────
+  const lagInterval = setInterval(() => {
+    if (!videoEl.buffered.length || videoEl.paused) return;
+    const end = videoEl.buffered.end(videoEl.buffered.length - 1);
+    if (end - videoEl.currentTime > 1.5) {
+      videoEl.currentTime = end - 0.1;
+    }
+  }, 500);
+
+  // ── WebSocket connection ───────────────────────────────────────────────────
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/viewer`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen  = () => setStatus('Connected – waiting for stream…');
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') {
+      // JSON control messages from the server
+      try {
+        const payload = JSON.parse(event.data);
+        console.log('[Viewer] Received JSON:', payload);
+        if (payload.type === 'status' && !payload.broadcasterConnected)
+          setStatus('Waiting for broadcaster to start sharing…');
+      } catch { /* ignore */ }
+      return;
     }
 
-    const mediaSource = new MediaSource();
-    videoEl.src = URL.createObjectURL(mediaSource);
+    // Binary: WebM data (either init segment or media cluster)
+    const chunk = new Uint8Array(event.data);
+    console.log(`[Viewer] Received ${chunk.byteLength} bytes`);
 
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${location.host}/ws/viewer`);
-    ws.binaryType = "arraybuffer";
-
-    const queue = [];
-    let sourceBuffer;
-
-    function appendNext() {
-        if (!sourceBuffer || sourceBuffer.updating || queue.length === 0) {
-            return;
-        }
-        sourceBuffer.appendBuffer(queue.shift());
+    // Check for init segment marker (0xFF prefix)
+    if (!initSegmentReceived && chunk[0] === 0xFF) {
+      // Extract init segment (skip the 0xFF marker)
+      const initChunk = chunk.slice(1);
+      console.log(`[Viewer] Init segment received: ${initChunk.byteLength} bytes, appending...`);
+      queue.push(initChunk);
+      initSegmentReceived = true;
+      appendNext();
+    } else if (initSegmentReceived) {
+      // Media cluster after init segment has been received
+      queue.push(chunk);
+      appendNext();
+      setStatus('Live');
+      videoEl.play().catch(() => { /* autoplay policy */ });
+    } else {
+      console.warn('[Viewer] Received media data before init segment, queuing...');
+      queue.push(chunk);
     }
+  };
 
-    mediaSource.addEventListener("sourceopen", () => {
-        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBuffer.mode = "sequence";
-        sourceBuffer.addEventListener("updateend", appendNext);
-        appendNext();
-    }, { once: true });
+  ws.onclose = () => {
+    clearInterval(trimInterval);
+    clearInterval(lagInterval);
+    setStatus('Disconnected from relay server.');
+  };
 
-    ws.onopen = () => {
-        statusEl.textContent = "Connected. Waiting for stream...";
-    };
-
-    ws.onmessage = (event) => {
-        if (typeof event.data === "string") {
-            try {
-                const payload = JSON.parse(event.data);
-                if (payload.type === "status" && !payload.broadcasterConnected) {
-                    statusEl.textContent = "Connected. Waiting for broadcaster...";
-                }
-            } catch (_) {
-                // Ignore non-JSON text payloads.
-            }
-            return;
-        }
-
-        queue.push(new Uint8Array(event.data));
-        appendNext();
-        statusEl.textContent = "Live stream playing.";
-        videoEl.play().catch(() => {});
-    };
-
-    ws.onclose = () => {
-        statusEl.textContent = "Disconnected from server.";
-    };
-
-    ws.onerror = () => {
-        statusEl.textContent = "Viewer socket error.";
-    };
+  ws.onerror = () => setStatus('WebSocket error.');
 }
 
-startViewer().catch((err) => {
-    statusEl.textContent = "Viewer failed: " + (err && err.message ? err.message : String(err));
-});
+startViewer().catch((e) => setStatus(`Error: ${e.message}`));
 </script>
 </body>
 </html>

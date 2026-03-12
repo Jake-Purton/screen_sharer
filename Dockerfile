@@ -1,15 +1,14 @@
-FROM python:3.11-slim
+FROM node:20-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+ENV NODE_ENV=production
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-COPY app.py index.html viewer.html ./
+COPY server.js index.html viewer.html ./
 
 EXPOSE 30003
 
-CMD ["python", "app.py"]
+CMD ["node", "server.js"]

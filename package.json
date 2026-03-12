@@ -1,0 +1,13 @@
+{
+  "name": "screen-share",
+  "version": "2.0.0",
+  "description": "Low-latency browser screen streaming via WebCodecs + WebSockets",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "webm-muxer": "^5.1.4",
+    "ws": "^8.18.0"
+  }
+}

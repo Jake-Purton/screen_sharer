@@ -54,11 +54,14 @@ async def ws_broadcast(request):
                         continue
                     try:
                         await viewer_ws.send_bytes(chunk)
-                    except ConnectionResetError:
+                    except Exception as e:
+                        print(f"Error sending to viewer: {type(e).__name__}: {e}")
                         stale.append(viewer_ws)
 
                 for closed_ws in stale:
                     viewer_sockets.discard(closed_ws)
+                if stale:
+                    print(f"Removed {len(stale)} stale viewer(s), {len(viewer_sockets)} remain")
 
             elif msg.type == WSMsgType.TEXT:
                 if msg.data == "ping":
@@ -78,6 +81,7 @@ async def ws_viewer(request):
     await ws.prepare(request)
 
     viewer_sockets.add(ws)
+    print(f"Viewer connected. Total viewers: {len(viewer_sockets)}")
 
     # New viewers get a short warm-up buffer for quicker start.
     for chunk in recent_chunks:
@@ -98,9 +102,13 @@ async def ws_viewer(request):
             if msg.type == WSMsgType.TEXT and msg.data == "ping":
                 await ws.send_str("pong")
             elif msg.type == WSMsgType.ERROR:
+                print("Received ERROR message from viewer")
                 break
+    except Exception as e:
+        print(f"Exception in viewer loop: {type(e).__name__}: {e}")
     finally:
         viewer_sockets.discard(ws)
+        print(f"Viewer disconnected. Total viewers: {len(viewer_sockets)}")
 
     return ws
 
