@@ -68,12 +68,31 @@ let running    = false;
 
 // ── Feature detection ────────────────────────────────────────────────────────
 function checkSupport() {
-  if (!navigator.mediaDevices?.getDisplayMedia)
-    throw new Error('getDisplayMedia not supported. Use Chrome 94+ or Firefox 130+.');
-  if (typeof VideoEncoder === 'undefined')
+  const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  if (!isLocalhost && !window.isSecureContext) {
+    throw new Error('Screen capture requires a secure origin (HTTPS). Use https://... or run from localhost.');
+  }
+
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    if (isIOS) {
+      throw new Error('iPad/iPhone browsers use WebKit (including Chrome on iPad). This app\'s capture pipeline is not supported on iOS. Use desktop Chrome/Firefox.');
+    }
+    throw new Error('getDisplayMedia is unavailable in this browser or origin. Use HTTPS and desktop Chrome/Firefox.');
+  }
+
+  if (typeof VideoEncoder === 'undefined') {
+    if (isIOS) {
+      throw new Error('WebCodecs (VideoEncoder) is unavailable on iOS WebKit for this app. Use desktop Chrome/Firefox.');
+    }
     throw new Error('WebCodecs (VideoEncoder) not available. Use Chrome 94+ or Firefox 130+.');
-  if (typeof MediaStreamTrackProcessor === 'undefined')
-    throw new Error('MediaStreamTrackProcessor not available. Use Chrome 94+.');
+  }
+
+  if (typeof MediaStreamTrackProcessor === 'undefined') {
+    throw new Error('MediaStreamTrackProcessor not available. Use desktop Chrome/Firefox.');
+  }
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────

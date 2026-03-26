@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from collections import deque
 
 from aiohttp import WSMsgType, web
@@ -19,6 +20,16 @@ async def index(request):
 @routes.get("/viewer")
 async def viewer(request):
     return web.FileResponse("viewer.html")
+
+
+@routes.get("/webm-muxer.mjs")
+async def webm_muxer(request):
+    muxer_path = Path("node_modules/webm-muxer/build/webm-muxer.mjs")
+    if not muxer_path.exists():
+        raise web.HTTPNotFound(
+            text="webm-muxer.mjs not found. Run npm install or use node server.js."
+        )
+    return web.FileResponse(muxer_path)
 
 
 @routes.get("/healthz")
